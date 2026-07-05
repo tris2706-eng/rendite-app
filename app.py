@@ -27,15 +27,18 @@ uploaded_file = st.file_uploader("Trade Republic CSV hochladen", type="csv")
 
 if uploaded_file is not None:
     try:
-        # Einlesen
+        # Einlesen & Leerzeichen aus Spaltennamen entfernen
         try:
             df = pd.read_csv(uploaded_file)
+            df.columns = df.columns.str.strip()
             if 'date' not in df.columns and 'Datum' not in df.columns:
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, sep=';', on_bad_lines='skip')
+                df.columns = df.columns.str.strip()
         except:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, sep=';', on_bad_lines='skip')
+            df.columns = df.columns.str.strip()
 
         # Spalten normalisieren
         col_mapping = {
@@ -52,14 +55,7 @@ if uploaded_file is not None:
         df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=True)
         df['year'] = df['date'].dt.year
 
-        # Strikte Cashflow-Erkennung (Keine internen TR-Buchungen!)
-        inflow_keywords = ['TRANSFER_INBOUND', 'TRANSFER_INSTANT_INBOUND', 'CUSTOMER_INPAYMENT', 'Einzahlung']
-        outflow_keywords = ['TRANSFER_INSTANT_OUTBOUND', 'CARD_TRANSACTION', 'CARD_TRANSACTION_INTERNATIONAL', 'Auszahlung', 'Kartenzahlung']
-        
-        inflows = df[df['type'].isin(inflow_keywords)].copy()
-        outflows = df[df['type'].isin(outflow_keywords)].copy()
-
-        # Euro-Beträge kugelsicher auslesen
+        # --- FEHLERBEHEBUNG: Beträge ZUERST umwandeln ---
         def parse_money(val):
             if pd.isna(val): return 0.0
             s = str(val).strip()
@@ -78,11 +74,24 @@ if uploaded_file is not None:
             val = float(s)
             return -val if is_negative else val
 
-        df['amount_clean'] = df['amount'].apply(parse_money)
+        # Erstellen der sauberen Zahlenspalte in der kompletten Liste
+        if 'amount' in df.columns:
+            df['amount_clean'] = df['amount'].apply(parse_money)
+        else:
+            st.error("Fehler: Konnte keine Spalte für den Betrag (Summe) finden.")
+            st.stop()
+
         if 'profit' in df.columns:
             df['profit_clean'] = df['profit'].apply(parse_money)
         else:
             df['profit_clean'] = 0.0
+
+        # --- DANACH erst die Ein- und Auszahlungen filtern ---
+        inflow_keywords = ['TRANSFER_INBOUND', 'TRANSFER_INSTANT_INBOUND', 'CUSTOMER_INPAYMENT', 'Einzahlung']
+        outflow_keywords = ['TRANSFER_INSTANT_OUTBOUND', 'CARD_TRANSACTION', 'CARD_TRANSACTION_INTERNATIONAL', 'Auszahlung', 'Kartenzahlung']
+        
+        inflows = df[df['type'].isin(inflow_keywords)].copy()
+        outflows = df[df['type'].isin(outflow_keywords)].copy()
 
         # --- Tabs ---
         tab1, tab2, tab3 = st.tabs(["💶 Übersicht", "📊 Rendite (IZF)", "💰 Cashflow"])
@@ -128,7 +137,6 @@ if uploaded_file is not None:
                     textfont=dict(color='white', size=14, family="Inter")
                 ))
                 
-                # Komplett gesperrtes Diagramm (stur!)
                 fig.update_layout(
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', dragmode=False,
                     xaxis=dict(showgrid=False, fixedrange=True, tickfont=dict(color='#A0AEC0')),
@@ -148,9 +156,9 @@ if uploaded_file is not None:
                 if st.button("Rendite berechnen", type="primary"):
                     cfs = []
                     for _, row in inflows.iterrows():
-                        cfs.append({'date': row['date'], 'amount': -abs(parse_money(row['amount']))})
+                        cfs.append({'date': row['date'], 'amount': -abs(row['amount_clean'])})
                     for _, row in outflows.iterrows():
-                        cfs.append({'date': row['date'], 'amount': abs(parse_money(row['amount']))})
+                        cfs.append({'date': row['date'], 'amount': abs(row['amount_clean'])})
                         
                     cf_df = pd.DataFrame(cfs)
                     cf_grouped = cf_df.groupby('date')['amount'].sum().reset_index()
@@ -190,7 +198,6 @@ if uploaded_file is not None:
                     color_discrete_sequence=['#3498db']
                 )
                 
-                # Komplett gesperrtes Diagramm
                 fig_month.update_layout(
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', dragmode=False,
                     xaxis=dict(fixedrange=True, tickfont=dict(color='#A0AEC0')),
