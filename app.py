@@ -10,24 +10,24 @@ st.set_page_config(page_title="Meine Rendite", page_icon="📈", layout="centere
 
 st.markdown("""
 <style>
-    .stApp { background-color: #0E1117; }
-    h1, h2, h3 { color: #FFFFFF !important; font-family: 'Segoe UI', Tahoma, sans-serif; }
-    .stMetric label { color: #A0AEC0 !important; font-weight: bold; }
+    .stApp { background-color: #0B0E14; }
+    h1, h2, h3 { color: #FFFFFF !important; font-family: 'Inter', sans-serif; }
+    .stMetric label { color: #8A92A6 !important; font-weight: 600; }
     .stMetric value { color: #FFFFFF !important; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: #1E2329; border-radius: 8px 8px 0 0; padding: 10px 20px; }
-    .stTabs [aria-selected="true"] { background-color: #2ECC71 !important; color: #000000 !important; font-weight: bold; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: #0B0E14; }
+    .stTabs [data-baseweb="tab"] { background-color: #1A1D24; border-radius: 8px 8px 0 0; padding: 10px 20px; border: 1px solid #2A2D34; border-bottom: none; }
+    .stTabs [aria-selected="true"] { background-color: #2ECC71 !important; color: #000000 !important; font-weight: bold; border-color: #2ECC71; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📈 Mein Finanz-Dashboard")
 
 # --- Datei-Upload ---
-uploaded_file = st.file_uploader("Trade Republic CSV hochladen (Am besten den kompletten 'Aktivitäten'-Export)", type="csv")
+uploaded_file = st.file_uploader("Trade Republic CSV hochladen", type="csv")
 
 if uploaded_file is not None:
     try:
-        # Robustes Einlesen (Komma oder Semikolon, UTF-8)
+        # Einlesen
         try:
             df = pd.read_csv(uploaded_file)
             if 'date' not in df.columns and 'Datum' not in df.columns:
@@ -37,7 +37,7 @@ if uploaded_file is not None:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, sep=';', on_bad_lines='skip')
 
-        # Spaltennamen normalisieren (Englisch & Deutsch)
+        # Spalten normalisieren
         col_mapping = {
             'Datum': 'date', 'Transaktionen': 'type', 'Typ': 'type',
             'Summe': 'amount', 'Betrag': 'amount', 'Total': 'total',
@@ -45,90 +45,113 @@ if uploaded_file is not None:
         }
         df = df.rename(columns=lambda x: col_mapping.get(x, x))
         
-        # Datum umwandeln
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=True)
-            df['year'] = df['date'].dt.year
-        else:
+        if 'date' not in df.columns:
             st.error("Fehler: Konnte keine Datums-Spalte finden.")
             st.stop()
 
-        # Tabs erstellen
-        tab1, tab2, tab3 = st.tabs(["💶 Jahres-Performance", "📊 Rendite (IZF)", "💰 Cashflow"])
+        df['date'] = pd.to_datetime(df['date'], format='mixed', dayfirst=True)
+        df['year'] = df['date'].dt.year
 
-        # === TAB 1: eToro-Style Chart (Realisierter Gewinn) ===
+        # Strikte Cashflow-Erkennung (Keine internen TR-Buchungen!)
+        inflow_keywords = ['TRANSFER_INBOUND', 'TRANSFER_INSTANT_INBOUND', 'CUSTOMER_INPAYMENT', 'Einzahlung']
+        outflow_keywords = ['TRANSFER_INSTANT_OUTBOUND', 'CARD_TRANSACTION', 'CARD_TRANSACTION_INTERNATIONAL', 'Auszahlung', 'Kartenzahlung']
+        
+        inflows = df[df['type'].isin(inflow_keywords)].copy()
+        outflows = df[df['type'].isin(outflow_keywords)].copy()
+
+        # Euro-Beträge kugelsicher auslesen
+        def parse_money(val):
+            if pd.isna(val): return 0.0
+            s = str(val).strip()
+            if not s: return 0.0
+            is_negative = s.startswith('-')
+            if is_negative: s = s[1:]
+            
+            if s.count('.') > 0 and s.count(',') > 0:
+                if s.find('.') < s.find(','):
+                    s = s.replace('.', '').replace(',', '.')
+                else:
+                    s = s.replace(',', '')
+            elif s.count(',') == 1:
+                s = s.replace(',', '.')
+            
+            val = float(s)
+            return -val if is_negative else val
+
+        df['amount_clean'] = df['amount'].apply(parse_money)
+        if 'profit' in df.columns:
+            df['profit_clean'] = df['profit'].apply(parse_money)
+        else:
+            df['profit_clean'] = 0.0
+
+        # --- Tabs ---
+        tab1, tab2, tab3 = st.tabs(["💶 Übersicht", "📊 Rendite (IZF)", "💰 Cashflow"])
+
+        # === TAB 1: GESAMTÜBERSICHT ===
         with tab1:
-            st.subheader("Dein realisierter Gewinn nach Jahren")
+            st.subheader("Dein wahrer Gewinn & Jahres-Erträge")
             
-            yearly_profit = pd.DataFrame()
+            current_value = st.number_input("Dein Depotwert in der TR App (inkl. Cash) in €:", min_value=0.0, value=730.04, step=10.0)
             
-            # Wir nutzen die exakte Gewinn/Verlust Spalte von Trade Republic für absolute Genauigkeit
-            if 'profit' in df.columns:
-                # Kommas in Punkte umwandeln für die Mathematik
-                df['profit'] = pd.to_numeric(df['profit'].astype(str).replace(',', '.', regex=True), errors='coerce')
-                yearly_profit = df.groupby('year')['profit'].sum().reset_index()
+            # Die echte Mathematik: Eingezahlt minus Ausgezahlt
+            total_in = abs(sum(inflows['amount_clean']))
+            total_out = abs(sum(outflows['amount_clean']))
+            
+            net_invested = total_in - total_out
+            total_profit_euro = current_value - net_invested
+            
+            colA, colB = st.columns(2)
+            colA.metric("Netto Investiert", f"{net_invested:.2f} €")
+            colB.metric("Gesamter Gewinn", f"{total_profit_euro:+.2f} €")
+            
+            st.markdown("---")
+            st.markdown("### Erträge nach Jahren")
+            
+            if 'profit' not in df.columns:
+                st.info("💡 Da in dieser CSV-Datei von TR deine Kursgewinne fehlen, zeigt das Diagramm hier unten streng genommen nur deine harten Cash-Ausschüttungen (Dividenden/Zinsen). Dein kompletter All-Time-Gewinn steht oben rechts!")
+                yields = df[df['type'].isin(['DIVIDEND', 'INTEREST', 'Dividende', 'Zinsen', 'CORPORATE_ACTION'])].copy()
+                yearly_profit = yields.groupby('year')['amount_clean'].sum().reset_index()
             else:
-                st.warning("In dieser CSV fehlt die 'Gewinn/Verlust' Spalte. Zeige nur Dividenden/Zinsen als Ertrag.")
-                yields = df[df['type'].isin(['DIVIDEND', 'INTEREST', 'Dividende', 'Zinsen', 'CORPORATE_ACTION'])]
-                if not yields.empty:
-                    yields['amount'] = pd.to_numeric(yields['amount'].astype(str).replace(',', '.', regex=True), errors='coerce')
-                    yearly_profit = yields.groupby('year')['amount'].sum().reset_index()
-                    yearly_profit.rename(columns={'amount': 'profit'}, inplace=True)
+                yearly_profit = df.groupby('year')['profit_clean'].sum().reset_index()
 
             if not yearly_profit.empty:
-                # Die eToro Logik: Grün für Plus, Rot für Minus
-                yearly_profit['color'] = np.where(yearly_profit['profit'] >= 0, '#00C853', '#FF3D00')
+                y_col = 'amount_clean' if 'profit' not in df.columns else 'profit_clean'
+                yearly_profit['color'] = np.where(yearly_profit[y_col] >= 0, '#00C853', '#FF3D00')
                 
-                # Der moderne Chart
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
                     x=yearly_profit['year'].astype(str),
-                    y=yearly_profit['profit'],
+                    y=yearly_profit[y_col],
                     marker_color=yearly_profit['color'],
-                    text=yearly_profit['profit'].apply(lambda x: f"{x:+.2f} €"),
-                    textposition='outside', # Text über den Balken
-                    textfont=dict(color='white', size=16, family="Arial Black"),
-                    cliponaxis=False
+                    text=yearly_profit[y_col].apply(lambda x: f"{x:+.2f} €"),
+                    textposition='outside',
+                    textfont=dict(color='white', size=14, family="Inter")
                 ))
                 
+                # Komplett gesperrtes Diagramm (stur!)
                 fig.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color='#A0AEC0'),
-                    xaxis=dict(showgrid=False, showline=True, linewidth=2, linecolor='#555', tickfont=dict(size=14)),
-                    yaxis=dict(showgrid=True, gridcolor='#333', zeroline=True, zerolinecolor='#888', zerolinewidth=2),
-                    margin=dict(l=20, r=20, t=40, b=20)
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', dragmode=False,
+                    xaxis=dict(showgrid=False, fixedrange=True, tickfont=dict(color='#A0AEC0')),
+                    yaxis=dict(showgrid=True, gridcolor='#2A2D34', fixedrange=True, zeroline=True, zerolinecolor='#444', tickfont=dict(color='#A0AEC0')),
+                    margin=dict(l=0, r=0, t=20, b=0)
                 )
                 
-                st.plotly_chart(fig, use_container_width=True)
-                
-                total_profit = yearly_profit['profit'].sum()
-                st.metric(label="Realisierter Gesamtgewinn (All-Time)", value=f"{total_profit:+.2f} €")
-            else:
-                st.info("Es konnten keine Gewinne oder Dividenden berechnet werden.")
+                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
         # === TAB 2: RENDITE (XIRR) ===
         with tab2:
             st.subheader("Dein Interner Zinsfuß (XIRR)")
             
-            # Ein- und Auszahlungen filtern (sehr breit gefasst, schließt alles außer Trades aus)
-            trade_types = ['BUY', 'SELL', 'DIVIDEND', 'INTEREST', 'CORPORATE_ACTION', 'TAX_OPTIMIZATION', 
-                           'Kauf', 'Verkauf', 'Dividende', 'Zinsen', 'Steuer']
-            
-            transfers = df[~df['type'].isin(trade_types)].copy()
-            
-            if transfers.empty or len(transfers) < 2:
-                st.warning("⚠️ **Hinweis:** Um die XIRR % Rendite zu berechnen, benötigt die App deine Ein- und Auszahlungen. Diese scheinen in dieser spezifischen CSV zu fehlen (Trade Republic lagert diese oft in eine separate 'Cash'-Datei aus).")
+            if inflows.empty and outflows.empty:
+                st.warning("Keine externen Ein- oder Auszahlungen in dieser CSV gefunden.")
             else:
-                current_value = st.number_input("Aktueller Depotwert (inkl. Cash) in €:", min_value=0.0, value=730.04, step=10.0)
-                
-                if st.button("Rendite berechnen"):
+                if st.button("Rendite berechnen", type="primary"):
                     cfs = []
-                    for _, row in transfers.iterrows():
-                        if pd.notna(row['amount']):
-                            amt = float(str(row['amount']).replace(',', '.'))
-                            cfs.append({'date': row['date'], 'amount': -amt})
-                            
+                    for _, row in inflows.iterrows():
+                        cfs.append({'date': row['date'], 'amount': -abs(parse_money(row['amount']))})
+                    for _, row in outflows.iterrows():
+                        cfs.append({'date': row['date'], 'amount': abs(parse_money(row['amount']))})
+                        
                     cf_df = pd.DataFrame(cfs)
                     cf_grouped = cf_df.groupby('date')['amount'].sum().reset_index()
                     cf_grouped = cf_grouped.sort_values('date')
@@ -148,29 +171,33 @@ if uploaded_file is not None:
                         st.metric(label="Echte Rendite p.a.", value=f"{irr * 100:.2f} %")
                         st.balloons()
                     except:
-                        st.error("Berechnung fehlgeschlagen (Mathematischer Fehler).")
+                        st.error("Rendite konnte nicht berechnet werden.")
 
         # === TAB 3: DIVIDENDEN DASHBOARD ===
         with tab3:
-            st.subheader("Dividenden & Zinsen (Passives Einkommen)")
+            st.subheader("Dividenden & Zinsen")
             yields = df[df['type'].isin(['DIVIDEND', 'INTEREST', 'Dividende', 'Zinsen', 'CORPORATE_ACTION'])].copy()
             
             if not yields.empty:
-                yields['amount'] = pd.to_numeric(yields['amount'].astype(str).replace(',', '.', regex=True), errors='coerce')
                 yields['month_year'] = yields['date'].dt.to_period('M').dt.start_time
-                monthly_yields = yields.groupby('month_year')['amount'].sum().reset_index()
+                monthly_yields = yields.groupby('month_year')['amount_clean'].sum().reset_index()
                 
                 fig_month = px.bar(
                     monthly_yields, 
                     x='month_year', 
-                    y='amount',
-                    labels={'month_year': 'Monat', 'amount': 'Ausschüttung in €'},
+                    y='amount_clean',
+                    labels={'month_year': 'Monat', 'amount_clean': 'Ausschüttung in €'},
                     color_discrete_sequence=['#3498db']
                 )
-                fig_month.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#A0AEC0'))
-                st.plotly_chart(fig_month, use_container_width=True)
-            else:
-                st.info("Noch keine Daten vorhanden.")
                 
+                # Komplett gesperrtes Diagramm
+                fig_month.update_layout(
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', dragmode=False,
+                    xaxis=dict(fixedrange=True, tickfont=dict(color='#A0AEC0')),
+                    yaxis=dict(fixedrange=True, gridcolor='#2A2D34', tickfont=dict(color='#A0AEC0')),
+                    margin=dict(l=0, r=0, t=20, b=0)
+                )
+                st.plotly_chart(fig_month, use_container_width=True, config={'displayModeBar': False})
+
     except Exception as e:
         st.error(f"Ein Fehler ist aufgetreten: {e}")
